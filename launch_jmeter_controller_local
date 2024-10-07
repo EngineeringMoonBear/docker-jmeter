@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# Replace the environment file to use, default to DigitalOcean
+app_env='app_do.env'
+
+# Generate token using Docker's built-in Swarm capabilities for service discovery
+echo "Initializing Docker Swarm to generate the token..."
+
+# Initialize Docker Swarm locally to get a worker join token
+SWARM_MANAGER_IP=$(hostname -I | awk '{print $1}')
+docker swarm init --advertise-addr "$SWARM_MANAGER_IP"
+
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to initialize Docker Swarm on the local node."
+    exit 1
+fi
+
+# Retrieve the join token for worker nodes
+TOKEN=$(docker swarm join-token -q worker)
+
+# Save the token to the environment file for later use
+echo "export TOKEN=$TOKEN" >> ./$app_env
+echo "Swarm worker join token saved in $app_env."
+
+# Provision a new machine for the JMeter Controller node using Docker Machine
+echo -e "
+Provisioning machine for JMeter Controller node:
+docker-machine create
+    --driver virtualbox
+    --engine-label type=controller
+    jmeter-controller"
+
+# Create the JMeter Controller node using Docker Machine
+docker-machine create \
+    --driver virtualbox \
+    --engine-label type=controller \
+    jmeter-controller
+
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to create the JMeter Controller machine."
+    exit 1
+fi
+
+# Initialize Docker Swarm on the controller node
+eval "$(docker-machine env jmeter-controller)"
+CONTROLLER_IP=$(docker-machine ip jmeter-controller)
+
+echo "Initializing Docker Swarm on JMeter Controller node with IP: $CONTROLLER_IP"
+docker swarm init --advertise-addr "$CONTROLLER_IP"
+
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to initialize Docker Swarm on the JMeter Controller node."
+    exit 1
+fi
+
+# Retrieve and save the join token for worker nodes from the controller node
+WORKER_JOIN_TOKEN=$(docker swarm join-token -q worker)
+
+# Update the environment file with the new Swarm join token
+if [[ -f "$app_env" ]]; then
+    sed -i '' "s/export TOKEN=.*/export TOKEN=$WORKER_JOIN_TOKEN/" "$app_env"
+    echo "Swarm worker join token updated in $app_env."
+else
+    echo "[ERROR] Environment file $app_env not found."
+    exit 1
+fi
+
+echo "JMeter Controller node provisioned and Swarm initialized successfully."
+echo "Swarm worker join token: $WORKER_JOIN_TOKEN"
+echo "To manage the swarm, run: eval \"\$(docker-machine env jmeter-controller)\""
+
+exit

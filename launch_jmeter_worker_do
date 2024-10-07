@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# Default to 1 if no parameter is given
+count=${1-1}
+
+# Max of 20 machines only, change accordingly
+max=20
+
+# Check if the count parameter is a positive integer within the allowed range
+if ! [[ $count =~ ^[0-9]+$ ]] || ! [[ "$count" -gt 0 && "$count" -le "$max" ]]; then
+    echo "[ERROR] Parameter is not a positive integer (must be between 1 and $max)." >&2
+    exit 1
+fi
+
+if [ "$count" -gt "$max" ]; then
+    count=$max
+fi
+
+# Initialize environment variables
+source ./app_do.env
+
+# Initialize iterator and IP list
+iterator=1
+server_ips=""
+
+while [ "$iterator" -le "$count" ]; do
+    echo "Provisioning machine for JMeter Worker node $iterator..."
+
+    # Create the DigitalOcean droplet for the JMeter worker
+    docker-machine create \
+        --driver digitalocean \
+        --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
+        --digitalocean-region "$DIGITALOCEAN_REGION" \
+        --digitalocean-size "$DIGITALOCEAN_SIZE" \
+        --digitalocean-image "ubuntu-20-04-x64" \
+        --engine-label type=worker \
+        jmeter-worker-$iterator
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to create the JMeter Worker machine: jmeter-worker-$iterator."
+        exit 1
+    fi
+
+    # Add a delay to allow the Droplet to finish initializing
+    echo "Waiting 60 seconds for the Droplet to fully initialize..."
+    sleep 60
+
+    # Set the environment variables to point to the newly created machine
+    eval "$(docker-machine env jmeter-worker-$iterator)"
+
+    # Add another delay to ensure SSH setup is ready
+    echo "Waiting 30 seconds to ensure SSH is available on the new Droplet..."
+    sleep 30
+
+    # Get the public IP address of the worker node
+    ip=$(docker-machine ip jmeter-worker-$iterator)
+
+    echo "Running JMeter in Server Mode on jmeter-worker-$iterator with IP: $ip..."
+
+    # Run the JMeter server using the updated Docker image
+    docker run \
+        --detach \
+        --publish 1099:1099 \
+        --env IP=$ip \
+        justb4/jmeter
+
+    # Concatenate worker IP addresses
+    server_ips+="$ip,"
+
+    # Increment the iterator
+    iterator=$((iterator + 1))
+done
+
+# Output the list of worker IP addresses for use by the JMeter Controller node
+echo "Worker IPs for use in JMeter Controller: $(echo $server_ips | sed 's/,$//')"
+
+exit
