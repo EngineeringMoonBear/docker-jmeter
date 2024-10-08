@@ -41,8 +41,9 @@ while [ "$iterator" -le "$count" ]; do
         exit 1
     fi
 
-# **Update Ubuntu system on the JMeter Worker node** (Newly Added)
-    docker-machine ssh jmeter-worker-$iterator "sudo apt-get update && sudo apt-get upgrade -y"
+#**Non-Interactive System Update**
+echo "Updating the Ubuntu system on jmeter-controller without interactive prompts..."
+docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
 
     # Add a delay to allow the Droplet to finish initializing
     echo "Waiting 60 seconds for the Droplet to fully initialize..."
@@ -71,6 +72,7 @@ while [ "$iterator" -le "$count" ]; do
     docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/udp"
     docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4789/udp"
     docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 1099/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw --force enable"
 
     echo "Firewall rules configured to allow necessary ports for Docker Swarm and JMeter."
 
