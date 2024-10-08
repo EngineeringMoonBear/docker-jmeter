@@ -30,6 +30,10 @@ else
     fi
 fi
 
+# **Update Ubuntu system on the JMeter Controller node** (Newly Added)
+    docker-machine ssh jmeter-controller "sudo apt-get update && sudo apt-get upgrade -y"
+fi
+
 # Initialize Docker Swarm on the controller node
 eval "$(docker-machine env jmeter-controller)"
 SWARM_MANAGER_IP=$(docker-machine ip jmeter-controller)
@@ -42,6 +46,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# **Create a Docker overlay network for JMeter communication** (Newly Added)
+docker network create --driver overlay jmeter-network
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to create Docker overlay network 'jmeter-network'."
+    exit 1
+fi
+echo "Docker overlay network 'jmeter-network' created successfully."
+
 # Get the join token for worker nodes
 WORKER_JOIN_TOKEN=$(docker swarm join-token -q worker)
 
@@ -53,6 +65,15 @@ else
     echo "Error: app_do.env file not found at $APP_ENV_FILE"
     exit 1
 fi
+
+# **Add firewall rules to open necessary ports** (Newly Added)
+docker-machine ssh jmeter-controller "sudo ufw allow 2377/tcp"
+docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"
+docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"
+docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"
+docker-machine ssh jmeter-controller "sudo ufw allow 1099/tcp"
+
+echo "Firewall rules configured to allow necessary ports for Docker Swarm and JMeter."
 
 echo "JMeter Controller node provisioned and Swarm initialized successfully."
 echo "Swarm worker join token: $WORKER_JOIN_TOKEN"

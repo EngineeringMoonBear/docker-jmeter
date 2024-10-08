@@ -41,9 +41,22 @@ while [ "$iterator" -le "$count" ]; do
         exit 1
     fi
 
+# **Update Ubuntu system on the JMeter Worker node** (Newly Added)
+    docker-machine ssh jmeter-worker-$iterator "sudo apt-get update && sudo apt-get upgrade -y"
+
     # Add a delay to allow the Droplet to finish initializing
     echo "Waiting 60 seconds for the Droplet to fully initialize..."
     sleep 60
+
+     # Retry SSH connection with a loop to handle potential delays (Newly Added)
+    for i in {1..5}; do
+        if docker-machine ssh jmeter-worker-$iterator "echo 'SSH connection successful'"; then
+            break
+        else
+            echo "Retrying SSH connection to jmeter-worker-$iterator in 10 seconds..."
+            sleep 10
+        fi
+    done
 
     # Set the environment variables to point to the newly created machine
     eval "$(docker-machine env jmeter-worker-$iterator)"
@@ -52,15 +65,25 @@ while [ "$iterator" -le "$count" ]; do
     echo "Waiting 30 seconds to ensure SSH is available on the new Droplet..."
     sleep 30
 
+    # **Add firewall rules to open necessary ports for Docker Swarm and JMeter communication** (Newly Added)
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 2377/tcp"
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/tcp"
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/udp"
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4789/udp"
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 1099/tcp"
+
+    echo "Firewall rules configured to allow necessary ports for Docker Swarm and JMeter."
+
     # Get the public IP address of the worker node
     ip=$(docker-machine ip jmeter-worker-$iterator)
 
     echo "Running JMeter in Server Mode on jmeter-worker-$iterator with IP: $ip..."
 
-    # Run the JMeter server using the updated Docker image
+   # Run the JMeter server using the updated Docker image and attach it to the overlay network (Modified)
     docker run \
         --detach \
         --publish 1099:1099 \
+        --network jmeter-network \  # Ensures that the worker joins the same Docker overlay network
         --env IP=$ip \
         justb4/jmeter
 
