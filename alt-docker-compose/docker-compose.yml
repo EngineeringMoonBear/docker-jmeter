@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  jmeter-slave-1:
+    image: justb4/jmeter:5.5
+    container_name: jmeter-slave-1
+    volumes:
+      - ./tests:/mnt/jmeter
+    command: -s -n -Jclient.rmi.localport=7000 -Jserver.rmi.localport=60000 -Jserver.rmi.ssl.disable=true
+    ports:
+      - "60000:60000"
+      - "7000:7000"
+    environment:
+      - JMETER_MODE=slave
+    networks:
+      - jmeter-net
+
+  jmeter-slave-2:
+    image: justb4/jmeter:5.5
+    container_name: jmeter-slave-2
+    volumes:
+      - ./tests:/mnt/jmeter
+    command: -s -n -Jclient.rmi.localport=7000 -Jserver.rmi.localport=60000 -Jserver.rmi.ssl.disable=true
+    ports:
+      - "60001:60000"
+      - "7001:7000"
+    environment:
+      - JMETER_MODE=slave
+    networks:
+      - jmeter-net
+
+  jmeter-slave-3:
+    image: justb4/jmeter:5.5
+    container_name: jmeter-slave-3
+    volumes:
+      - ./tests:/mnt/jmeter
+    command: -s -n -Jclient.rmi.localport=7000 -Jserver.rmi.localport=60000 -Jserver.rmi.ssl.disable=true
+    ports:
+      - "60002:60000"
+      - "7002:7000"
+    environment:
+      - JMETER_MODE=slave
+    networks:
+      - jmeter-net
+
+networks:
+  jmeter-net:
+    driver: bridge

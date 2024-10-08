@@ -29,10 +29,9 @@ else
         exit 1
     fi
 fi
-
-# **Update Ubuntu system on the JMeter Controller node** (Newly Added)
-    docker-machine ssh jmeter-controller "sudo apt-get update && sudo apt-get upgrade -y"
-fi
+#**Non-Interactive System Update**
+echo "Updating the Ubuntu system on jmeter-controller without interactive prompts..."
+docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
 
 # Initialize Docker Swarm on the controller node
 eval "$(docker-machine env jmeter-controller)"
@@ -46,7 +45,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# **Create a Docker overlay network for JMeter communication** (Newly Added)
+# **Create a Docker overlay network for JMeter communication**
 docker network create --driver overlay jmeter-network
 if [ $? -ne 0 ]; then
     echo "Error: Failed to create Docker overlay network 'jmeter-network'."
@@ -72,6 +71,7 @@ docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"
 docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"
 docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"
 docker-machine ssh jmeter-controller "sudo ufw allow 1099/tcp"
+docker-machine ssh jmeter-controller "sudo ufw --force enable"
 
 echo "Firewall rules configured to allow necessary ports for Docker Swarm and JMeter."
 
