@@ -23,10 +23,7 @@ To create a JMeter Controller node on DigitalOcean, use the following command:
 ./launch_jmeter_controller_do
 ```
 
-To create a JMeter Controller node on your local machine, use:
-```bash
-./launch_jmeter_controller_local
-```
+The script will automatically handle updates, configure firewall rules, and initialize Docker Swarm in a non-interactive mode, ensuring that no manual intervention is needed.
 
 #### 2. Provision JMeter Worker Nodes (Server Mode)
 
@@ -36,6 +33,8 @@ For DigitalOcean:
 ```bash
 ./launch_jmeter_worker_do 2
 ```
+
+The provisioning script will also handle the latest configuration updates, apply necessary firewall rules, and connect each worker node to the Docker overlay network.
 
 #### 3. Copy the JMeter Test Plan to the JMeter Controller Node
 
@@ -49,12 +48,7 @@ docker-machine ssh jmeter-controller
 
 **Create the `/load_tests` directory on DigitalOcean:**
 ```bash
-mkdir /load_tests
-```
-
-**Create the `/load_tests` directory on your local machine:**
-```bash
-sudo mkdir /load_tests && sudo chown docker:docker /load_tests
+sudo mkdir /load_tests && sudo chown $(whoami):$(whoami) /load_tests
 ```
 
 **Exit back to your host machine:**
@@ -87,7 +81,7 @@ IP=$(docker-machine ip jmeter-controller)
 
 Replace the value with the comma-separated IP addresses of the worker nodes:
 ```bash
-REMOTE_HOSTS=""
+REMOTE_HOSTS="worker1_ip,worker2_ip,worker3_ip"
 ```
 
 **Specify the Test Plan Details:**
@@ -111,6 +105,8 @@ docker run \
     --env constraint:type==controller \
     hhcordero/docker-jmeter-client
 ```
+
+This command initiates the load test, ensuring all worker nodes participate as specified.
 
 #### 5. Monitor Test Output
 
@@ -140,6 +136,20 @@ docker-machine scp [controller machine name]:/load_tests/[test dir]/[test plan r
 docker-machine scp jmeter-controller:/load_tests/${TEST_DIR}/${TEST_PLAN}.jtl /home/user/docker-jmeter-controller/load_tests/my_test/.
 ```
 
+### New Enhancements in the Workflow
+
+1. **Automated System Update**:
+   - The provisioning scripts automatically update and upgrade the Ubuntu system to ensure that it is using the latest software versions in a non-interactive manner.
+
+2. **Non-Interactive Firewall Configuration**:
+   - Firewall rules are applied automatically to allow necessary ports for Docker Swarm and JMeter communication, ensuring that the nodes can connect without manual intervention.
+
+3. **Reliable SSH Connection Setup**:
+   - Added retry mechanisms in the scripts to ensure stable SSH connections to each node, improving reliability during the setup process.
+
+4. **Overlay Network Configuration**:
+   - Worker nodes are automatically connected to a Docker overlay network, ensuring seamless communication between the controller and worker nodes during distributed load testing.
+
 ### Summary
 
-This workflow outlines how to set up a distributed JMeter testing environment using Docker Swarm with the updated terminology of "Controller" and "Worker" nodes. By utilizing modern Docker Swarm commands and focusing on DigitalOcean provisioning, we create a more streamlined and inclusive testing setup.
+This workflow outlines how to set up a distributed JMeter testing environment using Docker Swarm with the updated terminology of "Controller" and "Worker" nodes. By utilizing modern Docker Swarm commands and focusing on DigitalOcean provisioning, we create a streamlined, automated, and inclusive testing setup that reduces manual intervention and improves reliability.
