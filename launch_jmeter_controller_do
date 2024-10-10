@@ -4,7 +4,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ENV_FILE="$SCRIPT_DIR/app_do.env"
 
-# Function to check if a docker-machine already exists
+# Function to check if a Docker machine already exists
 function check_machine_exists() {
     docker-machine ls | grep -w "$1" > /dev/null 2>&1
 }
@@ -19,7 +19,7 @@ function regenerate_tls_certificates() {
     fi
 }
 
-# Ensure the DigitalOcean firewall allows port 2376 for Docker Machine communication
+# Ensure the DigitalOcean firewall allows required ports for Docker and JMeter communication
 function configure_firewall() {
     echo "Configuring firewall rules on jmeter-controller..."
     docker-machine ssh jmeter-controller "sudo ufw allow 22/tcp"      # Allow SSH connections
@@ -28,7 +28,7 @@ function configure_firewall() {
     docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"    # Overlay network TCP
     docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"    # Overlay network UDP
     docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"    # Overlay network UDP (VXLAN)
-    docker-machine ssh jmeter-controller "sudo ufw allow 1099/tcp"    # JMeter communication port
+    docker-machine ssh jmeter-controller "sudo ufw allow 1099/tcp"    # JMeter RMI communication port
     docker-machine ssh jmeter-controller "sudo ufw --force enable"    # Enable UFW without prompt
 }
 
@@ -104,6 +104,19 @@ if [ $? -ne 0 ]; then
 fi
 echo "Docker overlay network 'jmeter-network' created successfully."
 
+# Set up JMeter to disable SSL for RMI communication
+echo "Disabling SSL for RMI communication in JMeter configuration..."
+docker-machine ssh jmeter-controller "docker run \
+    --detach \
+    --name jmeter-controller \
+    --volume /load_tests:/load_tests \
+    --env JMETER_OPTS='-Dserver.rmi.ssl.disable=true' \
+    justb4/jmeter:5.5 \
+    bash -c 'echo server.rmi.ssl.disable=true >> /opt/apache-jmeter-5.5/bin/jmeter.properties && \
+    echo client.rmi.localport=1099 >> /opt/apache-jmeter-5.5/bin/jmeter.properties && \
+    echo server.rmi.localport=1099 >> /opt/apache-jmeter-5.5/bin/jmeter.properties && \
+    echo server.rmi.port=4000 >> /opt/apache-jmeter-5.5/bin/jmeter.properties'"
+
 # Get the join token for worker nodes and update the environment file
 WORKER_JOIN_TOKEN=$(docker-machine ssh jmeter-controller "docker swarm join-token -q worker")
 if [[ -f "$APP_ENV_FILE" ]]; then
@@ -116,4 +129,6 @@ fi
 
 echo "JMeter Controller node provisioned and Swarm initialized successfully."
 echo "Swarm worker join token: $WORKER_JOIN_TOKEN"
-echo "To manage the swarm, run: eval \"\$(docker-machine env jmeter-controller)\""
+echo "To manage the swarm, run: eval \"\\\$(docker-machine env jmeter-controller)\""
+
+

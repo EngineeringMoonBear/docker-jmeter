@@ -3,7 +3,7 @@
 # Default to 1 if no parameter is given
 count=${1-1}
 
-# Max of 20 machines only, change accordingly
+# Max of 20 machines only, adjust accordingly if needed
 max=20
 
 # Check if the count parameter is a positive integer within the allowed range
@@ -12,6 +12,7 @@ if ! [[ $count =~ ^[0-9]+$ ]] || ! [[ "$count" -gt 0 && "$count" -le "$max" ]]; 
     exit 1
 fi
 
+# Limit the count to the maximum number of machines
 if [ "$count" -gt "$max" ]; then
     count=$max
 fi
@@ -19,14 +20,14 @@ fi
 # Initialize environment variables
 source ./app_do.env
 
-# Initialize iterator and IP list
+# Initialize iterator and IP list for worker nodes
 iterator=1
 server_ips=""
 
 while [ "$iterator" -le "$count" ]; do
     echo "Provisioning machine for JMeter Worker node $iterator..."
 
-    # Create the DigitalOcean droplet for the JMeter worker
+    # Create the DigitalOcean droplet for the JMeter worker node
     docker-machine create \
         --driver digitalocean \
         --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
@@ -41,15 +42,15 @@ while [ "$iterator" -le "$count" ]; do
         exit 1
     fi
 
-#**Non-Interactive System Update**
-echo "Updating the Ubuntu system on jmeter-controller without interactive prompts..."
-docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"
+    # Non-Interactive System Update to ensure UFW is installed and up-to-date
+    echo "Updating the Ubuntu system on jmeter-worker-$iterator without interactive prompts..."
+    docker-machine ssh jmeter-worker-$iterator "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
 
     # Add a delay to allow the Droplet to finish initializing
     echo "Waiting 60 seconds for the Droplet to fully initialize..."
     sleep 60
 
-     # Retry SSH connection with a loop to handle potential delays (Newly Added)
+    # Retry SSH connection with a loop to handle potential delays
     for i in {1..5}; do
         if docker-machine ssh jmeter-worker-$iterator "echo 'SSH connection successful'"; then
             break
@@ -62,34 +63,37 @@ docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-ge
     # Set the environment variables to point to the newly created machine
     eval "$(docker-machine env jmeter-worker-$iterator)"
 
-    # Add another delay to ensure SSH setup is ready
-    echo "Waiting 30 seconds to ensure SSH is available on the new Droplet..."
-    sleep 30
-
-    # **Add firewall rules to open necessary ports for Docker Swarm and JMeter communication** (Newly Added)
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 2377/tcp"
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/tcp"
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/udp"
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4789/udp"
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 1099/tcp"
-    docker-machine ssh jmeter-controller "sudo ufw --force enable"
-
-    echo "Firewall rules configured to allow necessary ports for Docker Swarm and JMeter."
+    # Configure firewall settings on the worker node
+    echo "Configuring firewall rules on jmeter-worker-$iterator for Docker Swarm and JMeter communication..."
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 2377/tcp"  # Docker Swarm manager port
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/tcp"  # Overlay network TCP
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/udp"  # Overlay network UDP
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4789/udp"  # Overlay network UDP (VXLAN)
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 1099/tcp"  # JMeter RMI communication port
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4000/tcp"  # Additional JMeter server communication port
+    docker-machine ssh jmeter-worker-$iterator "sudo ufw --force enable"   # Enable UFW without prompt
+    echo "Firewall rules configured successfully on jmeter-worker-$iterator."
 
     # Get the public IP address of the worker node
     ip=$(docker-machine ip jmeter-worker-$iterator)
 
+    # Run the JMeter server using the updated Docker image and attach it to the overlay network
     echo "Running JMeter in Server Mode on jmeter-worker-$iterator with IP: $ip..."
 
-   # Run the JMeter server using the updated Docker image and attach it to the overlay network (Modified)
-    docker run \
+    docker-machine ssh jmeter-worker-$iterator "docker run \
         --detach \
         --publish 1099:1099 \
-        --network jmeter-network \  # Ensures that the worker joins the same Docker overlay network
-        --env IP=$ip \
-        justb4/jmeter
+        --publish 4000:4000 \
+        --network jmeter-network \
+        --env JMETER_OPTS='-Dserver.rmi.ssl.disable=true -Djava.rmi.server.hostname=$ip' \
+        justb4/jmeter:5.5 -s -Jserver.rmi.localport=1099 -Jserver.rmi.ssl.disable=true -Jserver_port=4000"
 
-    # Concatenate worker IP addresses
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to run JMeter server on jmeter-worker-$iterator."
+        exit 1
+    fi
+
+    # Add the IP of the worker node to the list of server IPs
     server_ips+="$ip,"
 
     # Increment the iterator

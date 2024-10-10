@@ -1,3 +1,7 @@
+Here's the updated README with revisions based on the new JMeter scripting approach. I've included the latest configuration and script enhancements for provisioning nodes, configuring firewalls, and ensuring that everything runs smoothly in a non-interactive manner.
+
+---
+
 # Dockerized JMeter - A Distributed Load Testing Workflow
 
 ### Supported Cloud Providers:
@@ -23,7 +27,7 @@ To create a JMeter Controller node on DigitalOcean, use the following command:
 ./launch_jmeter_controller_do
 ```
 
-The script will automatically handle updates, configure firewall rules, and initialize Docker Sgit warm in a non-interactive mode, ensuring that no manual intervention is needed.
+The script will automatically handle updates, configure firewall rules, and initialize Docker Swarm in a non-interactive mode, ensuring that no manual intervention is needed.
 
 #### 2. Provision JMeter Worker Nodes (Server Mode)
 
