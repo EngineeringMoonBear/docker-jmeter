@@ -1,106 +1,138 @@
 #!/bin/bash
 
-# Default to 1 if no parameter is given
-count=${1-1}
+# Get the absolute path of the script's directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_ENV_FILE="$SCRIPT_DIR/app_do.env"
 
-# Max of 20 machines only, adjust accordingly if needed
-max=20
-
-# Check if the count parameter is a positive integer within the allowed range
-if ! [[ $count =~ ^[0-9]+$ ]] || ! [[ "$count" -gt 0 && "$count" -le "$max" ]]; then
-    echo "[ERROR] Parameter is not a positive integer (must be between 1 and $max)." >&2
+# Ensure the environment file is sourced
+if [[ -f "$APP_ENV_FILE" ]]; then
+    source "$APP_ENV_FILE"
+else
+    echo "[ERROR] app_do.env file not found at $APP_ENV_FILE."
     exit 1
 fi
 
-# Limit the count to the maximum number of machines
-if [ "$count" -gt "$max" ]; then
-    count=$max
+# Check for the swarm join token
+if [[ -z "$TOKEN" ]]; then
+    echo "[ERROR] Docker Swarm join token not found. Ensure the controller has initialized the swarm."
+    exit 1
 fi
 
-# Initialize environment variables
-source ./app_do.env
+# Function to check if a Docker machine already exists
+function check_machine_exists() {
+    docker-machine ls | grep -w "$1" > /dev/null 2>&1
+}
 
-# Initialize iterator and IP list for worker nodes
-iterator=1
-server_ips=""
+# Function to configure firewall settings
+function configure_firewall() {
+    echo "Configuring firewall rules on $1..."
+    docker-machine ssh "$1" "sudo ufw allow 22/tcp"     # Allow SSH connections
+    docker-machine ssh "$1" "sudo ufw allow 2377/tcp"   # Docker Swarm manager port
+    docker-machine ssh "$1" "sudo ufw allow 7946/tcp"   # Overlay network TCP
+    docker-machine ssh "$1" "sudo ufw allow 7946/udp"   # Overlay network UDP
+    docker-machine ssh "$1" "sudo ufw allow 4789/udp"   # Overlay network UDP (VXLAN)
+    docker-machine ssh "$1" "sudo ufw allow 1099/tcp"   # JMeter RMI communication port
+    docker-machine ssh "$1" "sudo ufw allow 4000/tcp"   # Additional JMeter communication port
+    docker-machine ssh "$1" "sudo ufw --force enable"   # Enable UFW without prompt
+}
 
-while [ "$iterator" -le "$count" ]; do
-    echo "Provisioning machine for JMeter Worker node $iterator..."
+# Create the worker node using Docker Machine
+function create_worker_node() {
+    node_name=$1
 
-    # Create the DigitalOcean droplet for the JMeter worker node
+    # Check if the machine already exists
+    if check_machine_exists "$node_name"; then
+        echo "Docker machine '$node_name' already exists. Skipping creation."
+        return 0
+    fi
+
+    echo "Creating Docker machine '$node_name'..."
     docker-machine create \
         --driver digitalocean \
         --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
         --digitalocean-region "$DIGITALOCEAN_REGION" \
         --digitalocean-size "$DIGITALOCEAN_SIZE" \
         --digitalocean-image "ubuntu-20-04-x64" \
+        --digitalocean-ssh-user root \
+        --digitalocean-ssh-port 22 \
+        --digitalocean-private-networking \
+        --engine-opt="engine-opts='--timeout=300'" \
+        --engine-env="DOCKER_OPTS=--dns-timeout=300" \
         --engine-label type=worker \
-        jmeter-worker-$iterator
+        "$node_name"
 
     if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to create the JMeter Worker machine: jmeter-worker-$iterator."
+        echo "[ERROR] Failed to create Docker machine '$node_name'."
         exit 1
     fi
 
-    # Non-Interactive System Update to ensure UFW is installed and up-to-date
-    echo "Updating the Ubuntu system on jmeter-worker-$iterator without interactive prompts..."
-    docker-machine ssh jmeter-worker-$iterator "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
+    # Non-interactive update and install firewall
+    echo "Updating and installing firewall on $node_name..."
+    docker-machine ssh "$node_name" "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
 
-    # Add a delay to allow the Droplet to finish initializing
-    echo "Waiting 60 seconds for the Droplet to fully initialize..."
-    sleep 60
+    # Configure firewall settings
+    configure_firewall "$node_name"
+}
 
-    # Retry SSH connection with a loop to handle potential delays
-    for i in {1..5}; do
-        if docker-machine ssh jmeter-worker-$iterator "echo 'SSH connection successful'"; then
-            break
-        else
-            echo "Retrying SSH connection to jmeter-worker-$iterator in 10 seconds..."
-            sleep 10
-        fi
-    done
+# Function to add the worker to the Docker Swarm
+function join_swarm() {
+    node_name=$1
+    manager_ip=$2
+    token=$3
 
-    # Set the environment variables to point to the newly created machine
-    eval "$(docker-machine env jmeter-worker-$iterator)"
+    echo "Ensuring $node_name joins the Docker Swarm..."
+    docker-machine ssh "$node_name" "docker swarm join --token $token $manager_ip:2377"
 
-    # Configure firewall settings on the worker node
-    echo "Configuring firewall rules on jmeter-worker-$iterator for Docker Swarm and JMeter communication..."
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 2377/tcp"  # Docker Swarm manager port
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/tcp"  # Overlay network TCP
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 7946/udp"  # Overlay network UDP
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4789/udp"  # Overlay network UDP (VXLAN)
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 1099/tcp"  # JMeter RMI communication port
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw allow 4000/tcp"  # Additional JMeter server communication port
-    docker-machine ssh jmeter-worker-$iterator "sudo ufw --force enable"   # Enable UFW without prompt
-    echo "Firewall rules configured successfully on jmeter-worker-$iterator."
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to join the swarm with node '$node_name'."
+        exit 1
+    fi
+}
+
+# Function to deploy the JMeter worker container
+function deploy_jmeter_worker() {
+    node_name=$1
 
     # Get the public IP address of the worker node
-    ip=$(docker-machine ip jmeter-worker-$iterator)
+    ip=$(docker-machine ip "$node_name")
 
-    # Run the JMeter server using the updated Docker image and attach it to the overlay network
-    echo "Running JMeter in Server Mode on jmeter-worker-$iterator with IP: $ip..."
-
-    docker-machine ssh jmeter-worker-$iterator "docker run \
+    echo "Running JMeter in Server Mode on $node_name with IP: $ip..."
+    docker-machine ssh "$node_name" "docker run \
         --detach \
+        --name jmeter-worker \
         --publish 1099:1099 \
         --publish 4000:4000 \
         --network jmeter-network \
-        --env JMETER_OPTS='-Dserver.rmi.ssl.disable=true -Djava.rmi.server.hostname=$ip' \
-        justb4/jmeter:5.5 -s -Jserver.rmi.localport=1099 -Jserver.rmi.ssl.disable=true -Jserver_port=4000"
+        justb4/jmeter:latest -s \
+        -Dserver.rmi.localport=1099 \
+        -Dserver.rmi.ssl.disable=true \
+        -Djava.rmi.server.hostname=$ip \
+        -Jserver.rmi.ssl.disable=true \
+        -Jserver_port=4000"
 
     if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to run JMeter server on jmeter-worker-$iterator."
+        echo "[ERROR] Failed to run JMeter server on $node_name."
         exit 1
     fi
 
-    # Add the IP of the worker node to the list of server IPs
-    server_ips+="$ip,"
+    echo "JMeter server is running on $node_name."
+}
 
-    # Increment the iterator
-    iterator=$((iterator + 1))
+# Main loop to create multiple worker nodes
+worker_count=${1-1}
+manager_ip=$(docker-machine ip jmeter-controller)
+
+for ((i=1; i<=worker_count; i++)); do
+    node_name="jmeter-worker-$i"
+
+    # Create the worker node
+    create_worker_node "$node_name"
+
+    # Join the worker to the swarm
+    join_swarm "$node_name" "$manager_ip" "$TOKEN"
+
+    # Deploy JMeter on the worker node
+    deploy_jmeter_worker "$node_name"
 done
 
-# Output the list of worker IP addresses for use by the JMeter Controller node
-echo "Worker IPs for use in JMeter Controller: $(echo $server_ips | sed 's/,$//')"
-
-exit
+echo "JMeter worker nodes created and connected to the swarm successfully."

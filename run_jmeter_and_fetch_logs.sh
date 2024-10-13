@@ -1,12 +1,25 @@
 #!/bin/bash
 
-# Function to set up Docker environment for a specific Docker machine
+# Function to set up Docker environment for the JMeter controller machine
 setup_docker_environment() {
     echo "Setting up Docker environment for machine 'jmeter-controller'..."
     eval "$(docker-machine env jmeter-controller)"
 }
 
-# Function to ensure the JMeter container is running
+# Function to gather worker node IPs
+get_worker_ips() {
+    echo "Gathering IP addresses of JMeter worker nodes..."
+    worker_ips=""
+    for i in $(docker-machine ls --filter "name=jmeter-worker-" --format "{{.Name}}"); do
+        ip=$(docker-machine ip "$i")
+        worker_ips+="$ip,"
+    done
+    # Remove the trailing comma from the list of IPs
+    worker_ips="${worker_ips%,}"
+    echo "Worker IPs: $worker_ips"
+}
+
+# Function to ensure the JMeter controller container is running
 ensure_container_running() {
     local container_name="jmeter-controller"
 
@@ -19,11 +32,11 @@ ensure_container_running() {
     fi
 }
 
-# Function to run the JMeter test plan in the existing container
+# Function to run the JMeter test plan in distributed mode
 run_jmeter_test_plan() {
-    echo "Running JMeter test plan in the existing container..."
+    echo "Running JMeter test plan in distributed mode on the controller node..."
     docker exec -it jmeter-controller \
-        jmeter -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log
+        jmeter -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log -R $worker_ips
 }
 
 # Function to wait for the JMeter test to complete
@@ -40,10 +53,10 @@ wait_for_test_completion() {
     echo "JMeter test has completed."
 }
 
-# Function to fetch JMeter logs and test results from the container
+# Function to fetch JMeter logs and test results from the controller container
 fetch_jmeter_logs_and_results() {
     local container_name="jmeter-controller"
-    echo "Fetching JMeter logs and test results..."
+    echo "Fetching JMeter logs and test results from the controller..."
 
     # Copy the log files from the container to the host machine
     docker cp "${container_name}:/load_tests/testplan-log.log" ./testplan-log.log
@@ -58,10 +71,10 @@ fetch_jmeter_logs_and_results() {
 
 # Main execution flow
 setup_docker_environment
+get_worker_ips
 ensure_container_running
 run_jmeter_test_plan
 wait_for_test_completion
 fetch_jmeter_logs_and_results
 
-echo "JMeter test plan execution completed. Logs and test results have been retrieved."
-
+echo "JMeter test plan execution completed in distributed mode. Logs and test results have been retrieved."
