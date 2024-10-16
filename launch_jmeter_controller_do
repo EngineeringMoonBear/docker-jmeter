@@ -89,8 +89,8 @@ else
     echo "Swarm is already active on the JMeter Controller node."
 fi
 
-# Create an overlay network for JMeter (fix issue with missing network)
-docker-machine ssh jmeter-controller "docker network create --driver overlay jmeter-network"
+# Create an overlay network for JMeter with the --attachable flag
+docker-machine ssh jmeter-controller "docker network create --driver overlay --attachable jmeter-network"
 if [ $? -ne 0 ]; then
     echo "[ERROR] Failed to create Docker overlay network 'jmeter-network'."
     exit 1
