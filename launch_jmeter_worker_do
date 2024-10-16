@@ -25,32 +25,38 @@ function regenerate_tls_certificates() {
 function configure_firewall() {
     echo "Configuring firewall rules on jmeter-worker-$1..."
     
-    # Allow SSH
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 22/tcp"
-
-    # Allow Docker daemon communication
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 2376/tcp"
-
-    # Docker Swarm management port
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 2377/tcp"
-
-    # Allow communication between nodes (TCP and UDP) for Docker Swarm
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 7946/tcp"
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 7946/udp"
-
-    # Overlay network traffic for Docker Swarm (UDP)
     docker-machine ssh jmeter-worker-$1 "sudo ufw allow 4789/udp"
-
-    # Enable firewall with the new rules
     docker-machine ssh jmeter-worker-$1 "sudo ufw --force enable"
 }
-
 
 # Function to remove old containers and images
 function cleanup_docker_resources() {
     echo "Cleaning up existing Docker containers and images on jmeter-worker-$1..."
     docker-machine ssh jmeter-worker-$1 "docker image prune -f"
     echo "Docker cleanup completed."
+}
+
+# Retry function to handle Docker installation
+function ensure_docker_installed() {
+    WORKER_ID=$1
+    for attempt in $(seq 1 $MAX_RETRIES); do
+        docker-machine ssh jmeter-worker-$WORKER_ID "docker --version"
+        if [ $? -eq 0 ]; then
+            echo "Docker successfully installed on jmeter-worker-$WORKER_ID."
+            return 0
+        else
+            echo "[WARNING] Docker installation failed on jmeter-worker-$WORKER_ID. Retrying in $SLEEP_TIME seconds... ($attempt/$MAX_RETRIES)"
+            sleep $SLEEP_TIME
+        fi
+    done
+
+    echo "[ERROR] Docker installation failed on jmeter-worker-$WORKER_ID after $MAX_RETRIES attempts."
+    return 1
 }
 
 # Function to provision a single worker node using Docker Machine
@@ -61,19 +67,29 @@ function provision_worker() {
     if check_machine_exists "jmeter-worker-$WORKER_ID"; then
         echo "Docker machine 'jmeter-worker-$WORKER_ID' already exists. Skipping creation."
     else
-        docker-machine create \
-            --driver digitalocean \
-            --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
-            --digitalocean-region "$DIGITALOCEAN_REGION" \
-            --digitalocean-size "$DIGITALOCEAN_SIZE" \
-            --digitalocean-image "ubuntu-20-04-x64" \
-            --engine-label type=worker \
-            jmeter-worker-$WORKER_ID
+        for attempt in $(seq 1 $MAX_RETRIES); do
+            docker-machine create \
+                --driver digitalocean \
+                --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
+                --digitalocean-region "$DIGITALOCEAN_REGION" \
+                --digitalocean-size "$DIGITALOCEAN_SIZE" \
+                --digitalocean-image "ubuntu-20-04-x64" \
+                --engine-label type=worker \
+                jmeter-worker-$WORKER_ID
 
-        if [ $? -ne 0 ]; then
-            echo "[ERROR] Failed to create the JMeter Worker machine."
-            return 1
-        fi
+            if [ $? -eq 0 ]; then
+                echo "Docker machine 'jmeter-worker-$WORKER_ID' successfully created."
+                break
+            else
+                if [[ $attempt -lt $MAX_RETRIES ]]; then
+                    echo "[WARNING] Failed to create Docker machine 'jmeter-worker-$WORKER_ID'. Retrying in $SLEEP_TIME seconds... ($attempt/$MAX_RETRIES)"
+                    sleep $SLEEP_TIME
+                else
+                    echo "[ERROR] Failed to create Docker machine 'jmeter-worker-$WORKER_ID' after $MAX_RETRIES attempts."
+                    return 1
+                fi
+            fi
+        done
     fi
 
     # Regenerate TLS certificates
@@ -84,6 +100,12 @@ function provision_worker() {
 
     # Configure firewall settings
     configure_firewall $WORKER_ID
+
+    # Ensure Docker is installed and retry if necessary
+    ensure_docker_installed $WORKER_ID
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
 
     # Cleanup old Docker resources
     cleanup_docker_resources $WORKER_ID
