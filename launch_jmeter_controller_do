@@ -122,3 +122,4 @@ fi
 docker-machine ssh jmeter-controller "docker run -d --name jmeter-controller --network jmeter-network --volume /load_tests:/load_tests justb4/jmeter:latest -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log -Dserver.rmi.ssl.disable=true"
 
 echo "JMeter Controller node provisioned and Swarm initialized successfully."
+

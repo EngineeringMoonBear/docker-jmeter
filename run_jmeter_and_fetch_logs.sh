@@ -6,17 +6,32 @@ setup_docker_environment() {
     eval "$(docker-machine env jmeter-controller)"
 }
 
-# Function to gather worker node IPs
+# Function to gather worker node IPs (1 through 20)
 get_worker_ips() {
     echo "Gathering IP addresses of JMeter worker nodes..."
     worker_ips=""
-    for i in $(docker-machine ls --filter "name=jmeter-worker-" --format "{{.Name}}"); do
-        ip=$(docker-machine ip "$i")
-        worker_ips+="$ip,"
+    
+    # Loop through worker IDs 1 to 20 and gather IP addresses
+    for i in $(seq 1 20); do
+        worker_name="jmeter-worker-$i"
+        
+        # Check if the worker machine exists
+        if docker-machine ls --filter "name=$worker_name" --format "{{.Name}}" | grep -q "$worker_name"; then
+            ip=$(docker-machine ip "$worker_name")
+            worker_ips+="$ip,"
+        fi
     done
+
     # Remove the trailing comma from the list of IPs
     worker_ips="${worker_ips%,}"
-    echo "Worker IPs: $worker_ips"
+
+    # Check if we found any worker IPs
+    if [[ -z "$worker_ips" ]]; then
+        echo "[ERROR] No JMeter worker nodes found."
+        exit 1
+    fi
+
+    echo "Discovered worker IPs: $worker_ips"
 }
 
 # Function to ensure the JMeter controller container is running
@@ -34,7 +49,7 @@ ensure_container_running() {
 
 # Function to run the JMeter test plan in distributed mode
 run_jmeter_test_plan() {
-    echo "Running JMeter test plan in distributed mode on the controller node..."
+    echo "Running JMeter test plan in distributed mode on the controller node with workers: $worker_ips"
     docker exec -it jmeter-controller \
         jmeter -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log -R $worker_ips
 }
