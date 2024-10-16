@@ -3,7 +3,9 @@
 # Get the absolute path of the script's directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_ENV_FILE="$SCRIPT_DIR/app_do.env"
-KEYSTORE_PATH="$SCRIPT_DIR/rmi_keystore.jks"
+
+# URL for the JMeter test plan file
+JMETER_TESTPLAN_URL="https://raw.githubusercontent.com/EngineeringMoonBear/docker-jmeter/main/testplan.jmx"
 
 # Function to check if a Docker machine already exists
 function check_machine_exists() {
@@ -12,159 +14,108 @@ function check_machine_exists() {
 
 # Function to forcefully regenerate TLS certificates
 function regenerate_tls_certificates() {
-    echo "Regenerating TLS certificates for jmeter-worker-$1..."
-    docker-machine regenerate-certs -f jmeter-worker-$1
+    echo "Regenerating TLS certificates for jmeter-controller..."
+    docker-machine regenerate-certs -f jmeter-controller
     if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to regenerate TLS certificates for jmeter-worker-$1."
+        echo "[ERROR] Failed to regenerate TLS certificates for jmeter-controller."
         exit 1
     fi
 }
 
-# Ensure the DigitalOcean firewall allows required ports for Docker and Swarm communication
+# Ensure the DigitalOcean firewall allows required ports for Docker and JMeter communication
 function configure_firewall() {
-    echo "Configuring firewall rules on jmeter-worker-$1..."
-    docker-machine ssh jmeter-worker-$1 "sudo ufw allow 22/tcp"      # Allow SSH connections
-    docker-machine ssh jmeter-worker-$1 "sudo ufw allow 2376/tcp"    # Docker Machine communication
-    docker-machine ssh jmeter-worker-$1 "sudo ufw allow 7946/tcp"    # Overlay network TCP
-    docker-machine ssh jmeter-worker-$1 "sudo ufw allow 7946/udp"    # Overlay network UDP
-    docker-machine ssh jmeter-worker-$1 "sudo ufw allow 4789/udp"    # Overlay network UDP (VXLAN)
-    docker-machine ssh jmeter-worker-$1 "sudo ufw --force enable"    # Enable UFW without prompt
-}
-
-# Function to copy the RMI keystore to the worker node
-function copy_keystore() {
-    echo "Copying rmi_keystore.jks to jmeter-worker-$1..."
-    docker-machine scp "$KEYSTORE_PATH" jmeter-worker-$1:/load_tests/rmi_keystore.jks
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to copy rmi_keystore.jks to jmeter-worker-$1."
-        exit 1
-    fi
-    echo "rmi_keystore.jks copied successfully to jmeter-worker-$1."
-}
-
-# Function to configure JMeter to use the keystore on the worker node
-function configure_jmeter_keystore() {
-    echo "Configuring JMeter on jmeter-worker-$1 to use rmi_keystore.jks..."
-    docker-machine ssh jmeter-worker-$1 "echo 'server.rmi.ssl.keystore.type=JKS' >> /opt/apache-jmeter-5.5/bin/user.properties"
-    docker-machine ssh jmeter-worker-$1 "echo 'server.rmi.ssl.keystore.file=/load_tests/rmi_keystore.jks' >> /opt/apache-jmeter-5.5/bin/user.properties"
-    docker-machine ssh jmeter-worker-$1 "echo 'server.rmi.ssl.keystore.pass=changeit' >> /opt/apache-jmeter-5.5/bin/user.properties"
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to configure JMeter keystore on jmeter-worker-$1."
-        exit 1
-    fi
-    echo "JMeter keystore configuration updated on jmeter-worker-$1."
+    echo "Configuring firewall rules on jmeter-controller..."
+    docker-machine ssh jmeter-controller "sudo ufw allow 22/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 2376/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"
+    docker-machine ssh jmeter-controller "sudo ufw --force enable"
 }
 
 # Function to remove old containers and images
 function cleanup_docker_resources() {
-    echo "Cleaning up existing Docker containers and images on jmeter-worker-$1..."
-    docker-machine ssh jmeter-worker-$1 "docker image prune -f"
+    echo "Cleaning up existing Docker containers and images on jmeter-controller..."
+    docker-machine ssh jmeter-controller "docker rm -f jmeter-controller || true"
+    docker-machine ssh jmeter-controller "docker image prune -f"
     echo "Docker cleanup completed."
 }
 
-# Function to create a worker node
-function create_worker() {
-    WORKER_ID=$1
-    if check_machine_exists "jmeter-worker-$WORKER_ID"; then
-        echo "Docker machine 'jmeter-worker-$WORKER_ID' already exists. Skipping creation."
-    else
-        docker-machine create \
-            --driver digitalocean \
-            --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
-            --digitalocean-region "$DIGITALOCEAN_REGION" \
-            --digitalocean-size "$DIGITALOCEAN_SIZE" \
-            --digitalocean-image "ubuntu-20-04-x64" \
-            --engine-label type=worker \
-            jmeter-worker-$WORKER_ID
+# Provision the JMeter Controller node using Docker Machine
+echo "Provisioning machine for JMeter Controller node..."
 
-        if [ $? -ne 0 ]; then
-            echo "[ERROR] Failed to create the JMeter Worker machine."
-            exit 1
-        fi
-    fi
-
-    # Regenerate TLS certificates to ensure secure communication
-    regenerate_tls_certificates $WORKER_ID
-
-    # Non-Interactive System Update to ensure UFW is installed and up-to-date
-    echo "Updating the Ubuntu system on jmeter-worker-$WORKER_ID without interactive prompts..."
-    docker-machine ssh jmeter-worker-$WORKER_ID "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
-
-    # Configure firewall settings
-    configure_firewall $WORKER_ID
-
-    # Copy the keystore and configure JMeter
-    copy_keystore $WORKER_ID
-    configure_jmeter_keystore $WORKER_ID
-
-    # Cleanup old Docker resources
-    cleanup_docker_resources $WORKER_ID
-
-    # Retry logic to connect to the JMeter Worker if the initial attempt fails
-    for i in {1..5}; do
-        if eval "$(docker-machine env jmeter-worker-$WORKER_ID)"; then
-            echo "Successfully connected to the JMeter Worker node $WORKER_ID."
-            break
-        else
-            echo "Connection to JMeter Worker node $WORKER_ID failed. Retrying in 15 seconds..."
-            sleep 15
-            regenerate_tls_certificates $WORKER_ID
-        fi
-    done
-
-    # If connection fails after retries, exit with an error message
-    if ! eval "$(docker-machine env jmeter-worker-$WORKER_ID)"; then
-        echo "[ERROR] Unable to connect to the JMeter Worker node $WORKER_ID after multiple attempts."
-        exit 1
-    fi
-
-    # Fetch the worker join token from the environment file
-    if [[ -f "$APP_ENV_FILE" ]]; then
-        source "$APP_ENV_FILE"
-        WORKER_JOIN_TOKEN=$TOKEN
-        if [[ -z "$WORKER_JOIN_TOKEN" ]]; then
-            echo "[ERROR] Swarm worker join token not found in $APP_ENV_FILE."
-            exit 1
-        fi
-    else
-        echo "[ERROR] app_do.env file not found at $APP_ENV_FILE."
-        exit 1
-    fi
-
-    # Join the Docker Swarm as a worker node
-    SWARM_MANAGER_IP=$(docker-machine ip jmeter-controller)
-    echo "Joining the Docker Swarm as a worker node with manager IP: $SWARM_MANAGER_IP"
-    docker-machine ssh jmeter-worker-$WORKER_ID "docker swarm join --token $WORKER_JOIN_TOKEN $SWARM_MANAGER_IP:2377"
+# Check if the machine already exists
+if check_machine_exists "jmeter-controller"; then
+    echo "Docker machine 'jmeter-controller' already exists. Skipping creation."
+else
+    docker-machine create \
+        --driver digitalocean \
+        --digitalocean-access-token "$DIGITALOCEAN_ACCESS_TOKEN" \
+        --digitalocean-region "$DIGITALOCEAN_REGION" \
+        --digitalocean-size "$DIGITALOCEAN_SIZE" \
+        --digitalocean-image "ubuntu-20-04-x64" \
+        --engine-label type=controller \
+        jmeter-controller
 
     if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to join the Docker Swarm as a worker node."
+        echo "[ERROR] Failed to create the JMeter Controller machine."
         exit 1
     fi
+fi
 
-    echo "JMeter Worker node $WORKER_ID successfully joined the Docker Swarm."
-}
+# Regenerate TLS certificates
+regenerate_tls_certificates
 
-# Check the input parameter to determine how many workers to create (between 1 and 20)
-if [[ $# -ne 1 ]]; then
-    echo "[ERROR] Please provide the number of workers to provision (1-20)."
+# Non-Interactive System Update to ensure UFW is installed
+docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
+
+# Configure firewall settings
+configure_firewall
+
+# Initialize Docker Swarm on the controller node (fix issue with swarm not initialized)
+SWARM_STATUS=$(docker-machine ssh jmeter-controller "docker info --format '{{.Swarm.LocalNodeState}}'")
+
+if [[ "$SWARM_STATUS" != "active" ]]; then
+    echo "Initializing Docker Swarm on JMeter Controller node..."
+    docker-machine ssh jmeter-controller "docker swarm init"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to initialize Docker Swarm on the JMeter Controller node."
+        exit 1
+    fi
+else
+    echo "Swarm is already active on the JMeter Controller node."
+fi
+
+# Create an overlay network for JMeter (fix issue with missing network)
+docker-machine ssh jmeter-controller "docker network create --driver overlay jmeter-network"
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Failed to create Docker overlay network 'jmeter-network'."
     exit 1
 fi
 
-NUM_WORKERS=$1
-if [[ "$NUM_WORKERS" -lt 1 || "$NUM_WORKERS" -gt 20 ]]; then
-    echo "[ERROR] Number of workers must be between 1 and 20."
+# Cleanup old Docker resources
+cleanup_docker_resources
+
+# Verify firewall status
+docker-machine ssh jmeter-controller "sudo ufw status verbose"
+
+# Create a directory for test plans and download the .jmx file
+docker-machine ssh jmeter-controller "sudo mkdir -p /load_tests && sudo chmod 777 /load_tests"
+docker-machine ssh jmeter-controller "curl -L $JMETER_TESTPLAN_URL -o /load_tests/testplan.jmx"
+
+# Pull the JMeter image
+docker-machine ssh jmeter-controller "docker pull justb4/jmeter:latest"
+
+# Get the join token for worker nodes and save it to the environment file
+WORKER_JOIN_TOKEN=$(docker-machine ssh jmeter-controller "docker swarm join-token -q worker")
+if [[ -f "$APP_ENV_FILE" ]]; then
+    sed -i '' "s/export TOKEN=.*/export TOKEN=$WORKER_JOIN_TOKEN/" "$APP_ENV_FILE"
+else
+    echo "[ERROR] app_do.env file not found at $APP_ENV_FILE."
     exit 1
 fi
 
-# Check if the keystore file exists
-if [[ ! -f "$KEYSTORE_PATH" ]]; then
-    echo "[ERROR] Keystore file not found at $KEYSTORE_PATH. Please ensure rmi_keystore.jks is available."
-    exit 1
-fi
+# Run the JMeter controller without SSL for RMI
+docker-machine ssh jmeter-controller "docker run -d --name jmeter-controller --network jmeter-network --volume /load_tests:/load_tests justb4/jmeter:latest -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log -Dserver.rmi.ssl.disable=true"
 
-# Create the specified number of workers
-for i in $(seq 1 $NUM_WORKERS); do
-    create_worker $i
-done
-
-echo "$NUM_WORKERS JMeter Worker nodes have been successfully provisioned and joined the Docker Swarm."
+echo "JMeter Controller node provisioned and Swarm initialized successfully."

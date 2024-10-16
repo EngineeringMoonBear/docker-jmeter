@@ -25,26 +25,19 @@ function regenerate_tls_certificates() {
 # Ensure the DigitalOcean firewall allows required ports for Docker and JMeter communication
 function configure_firewall() {
     echo "Configuring firewall rules on jmeter-controller..."
-    docker-machine ssh jmeter-controller "sudo ufw allow 22/tcp"      # Allow SSH connections
-    docker-machine ssh jmeter-controller "sudo ufw allow 2376/tcp"    # Docker Machine communication
-    docker-machine ssh jmeter-controller "sudo ufw allow 2377/tcp"    # Docker Swarm manager port
-    docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"    # Overlay network TCP
-    docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"    # Overlay network UDP
-    docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"    # Overlay network UDP (VXLAN)
-    docker-machine ssh jmeter-controller "sudo ufw allow 1099/tcp"    # JMeter RMI communication port
-    docker-machine ssh jmeter-controller "sudo ufw --force enable"    # Enable UFW without prompt
+    docker-machine ssh jmeter-controller "sudo ufw allow 22/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 2376/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 7946/tcp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 7946/udp"
+    docker-machine ssh jmeter-controller "sudo ufw allow 4789/udp"
+    docker-machine ssh jmeter-controller "sudo ufw --force enable"
 }
 
 # Function to remove old containers and images
 function cleanup_docker_resources() {
     echo "Cleaning up existing Docker containers and images on jmeter-controller..."
-
-    # Remove old JMeter container if it exists
     docker-machine ssh jmeter-controller "docker rm -f jmeter-controller || true"
-
-    # Remove unused images to free up space
     docker-machine ssh jmeter-controller "docker image prune -f"
-
     echo "Docker cleanup completed."
 }
 
@@ -70,107 +63,62 @@ else
     fi
 fi
 
-# Regenerate TLS certificates to ensure secure communication
+# Regenerate TLS certificates
 regenerate_tls_certificates
 
-# Non-Interactive System Update to ensure UFW is installed and up-to-date
-echo "Updating the Ubuntu system on jmeter-controller without interactive prompts..."
+# Non-Interactive System Update to ensure UFW is installed
 docker-machine ssh jmeter-controller "sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ufw"
 
 # Configure firewall settings
 configure_firewall
 
-# Cleanup old Docker resources
-cleanup_docker_resources
+# Get the public IP address of the controller node to use for Docker Swarm
+PUBLIC_IP=$(docker-machine ip jmeter-controller)
 
-# Verify firewall status to confirm that all necessary ports are open
-docker-machine ssh jmeter-controller "sudo ufw status verbose"
-echo "Firewall rules configured successfully for Docker Swarm and JMeter."
-
-# Retry logic to connect to the JMeter Controller if the initial attempt fails
-for i in {1..5}; do
-    if eval "$(docker-machine env jmeter-controller)"; then
-        echo "Successfully connected to the JMeter Controller node."
-        break
-    else
-        echo "Connection to JMeter Controller node failed. Retrying in 15 seconds..."
-        sleep 15
-        regenerate_tls_certificates
-    fi
-done
-
-# If connection fails after retries, exit with an error message
-if ! eval "$(docker-machine env jmeter-controller)"; then
-    echo "[ERROR] Unable to connect to the JMeter Controller node after multiple attempts."
-    exit 1
-fi
-
-# Initialize Docker Swarm on the controller node if not already in a swarm
-SWARM_MANAGER_IP=$(docker-machine ip jmeter-controller)
+# Initialize Docker Swarm on the controller node with the specified --advertise-addr
 SWARM_STATUS=$(docker-machine ssh jmeter-controller "docker info --format '{{.Swarm.LocalNodeState}}'")
 
-if [[ "$SWARM_STATUS" == "active" || "$SWARM_STATUS" == "pending" ]]; then
-    echo "This node is already part of a swarm. Skipping Swarm initialization."
-else
-    echo "Initializing Docker Swarm on JMeter Controller node with IP: $SWARM_MANAGER_IP"
-    docker-machine ssh jmeter-controller "docker swarm init --advertise-addr $SWARM_MANAGER_IP"
+if [[ "$SWARM_STATUS" != "active" ]]; then
+    echo "Initializing Docker Swarm on JMeter Controller node..."
+    docker-machine ssh jmeter-controller "docker swarm init --advertise-addr $PUBLIC_IP"
     if [ $? -ne 0 ]; then
         echo "[ERROR] Failed to initialize Docker Swarm on the JMeter Controller node."
         exit 1
     fi
+else
+    echo "Swarm is already active on the JMeter Controller node."
 fi
 
-# Create a Docker overlay network for JMeter communication
+# Create an overlay network for JMeter (fix issue with missing network)
 docker-machine ssh jmeter-controller "docker network create --driver overlay jmeter-network"
 if [ $? -ne 0 ]; then
     echo "[ERROR] Failed to create Docker overlay network 'jmeter-network'."
     exit 1
 fi
-echo "Docker overlay network 'jmeter-network' created successfully."
 
-# Create directory for test plans and download the .jmx file
-echo "Creating the directory for test plans and downloading the JMeter test plan..."
+# Cleanup old Docker resources
+cleanup_docker_resources
+
+# Verify firewall status
+docker-machine ssh jmeter-controller "sudo ufw status verbose"
+
+# Create a directory for test plans and download the .jmx file
 docker-machine ssh jmeter-controller "sudo mkdir -p /load_tests && sudo chmod 777 /load_tests"
 docker-machine ssh jmeter-controller "curl -L $JMETER_TESTPLAN_URL -o /load_tests/testplan.jmx"
 
-if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to download the JMeter test plan."
-    exit 1
-fi
-echo "JMeter test plan downloaded successfully."
-
 # Pull the JMeter image
-echo "Pulling the justb4/jmeter:latest image..."
 docker-machine ssh jmeter-controller "docker pull justb4/jmeter:latest"
 
-if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to pull the JMeter Docker image."
-    exit 1
-fi
-
-# Run the JMeter container and execute the test plan
-echo "Running the JMeter container and executing the test plan..."
-docker-machine ssh jmeter-controller "docker run -d --name jmeter-controller --volume /load_tests:/load_tests justb4/jmeter:latest -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log"
-
-if [ $? -ne 0 ]; then
-    echo "[ERROR] Failed to start the JMeter container."
-    exit 1
-fi
-
-# Get the join token for worker nodes and update the environment file
+# Get the join token for worker nodes and save it to the environment file
 WORKER_JOIN_TOKEN=$(docker-machine ssh jmeter-controller "docker swarm join-token -q worker")
 if [[ -f "$APP_ENV_FILE" ]]; then
     sed -i '' "s/export TOKEN=.*/export TOKEN=$WORKER_JOIN_TOKEN/" "$APP_ENV_FILE"
-    echo "Swarm join token updated in $APP_ENV_FILE."
 else
     echo "[ERROR] app_do.env file not found at $APP_ENV_FILE."
     exit 1
 fi
 
-# Restart the system to ensure all configurations are applied properly
-echo "Rebooting the JMeter Controller node to apply all configurations..."
-docker-machine ssh jmeter-controller "sudo reboot"
+# Run the JMeter controller without SSL for RMI
+docker-machine ssh jmeter-controller "docker run -d --name jmeter-controller --network jmeter-network --volume /load_tests:/load_tests justb4/jmeter:latest -n -t /load_tests/testplan.jmx -l /load_tests/testplan-results.jtl -j /load_tests/testplan-log.log -Dserver.rmi.ssl.disable=true"
 
 echo "JMeter Controller node provisioned and Swarm initialized successfully."
-echo "Swarm worker join token: $WORKER_JOIN_TOKEN"
-echo "To manage the swarm, run: eval \"\\\$(docker-machine env jmeter-controller)\""
