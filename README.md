@@ -1,7 +1,3 @@
-Here's the updated README with revisions based on the new JMeter scripting approach. I've included the latest configuration and script enhancements for provisioning nodes, configuring firewalls, and ensuring that everything runs smoothly in a non-interactive manner.
-
----
-
 # Dockerized JMeter - A Distributed Load Testing Workflow
 
 ### Supported Cloud Providers:
